@@ -249,7 +249,10 @@ interface ApiKeyView extends JsonRecord {
 }
 
 // LRU cache for API key validation (valid keys only)
-const _keyValidationCache = new Map<string, { valid: boolean; timestamp: number }>();
+const _keyValidationCache = new Map<
+  string,
+  { valid: boolean; timestamp: number; expiresMs?: number }
+>();
 const _keyMetadataCache = new Map<string, CacheEntry<ApiKeyMetadata>>();
 const _lastUsedUpdateCache = new Map<string, number>();
 const CACHE_TTL = 60 * 1000; // 1 minute TTL
@@ -1298,7 +1301,7 @@ export async function validateApiKey(key: string | null | undefined) {
 
   const cached = _keyValidationCache.get(cacheKey);
   if (cached && now - cached.timestamp < CACHE_TTL) {
-    return cached.valid;
+    return cached.valid && (cached.expiresMs === undefined || cached.expiresMs > now);
   }
 
   // A Redis hit never authorizes on its own (GHSA-66vh-35g3-78qv): eviction on regenerate/revoke
@@ -1322,13 +1325,14 @@ export async function validateApiKey(key: string | null | undefined) {
   if (typeof revokedAt === "string" && revokedAt.trim() !== "") return false;
 
   const expiresAt = row.expires_at ?? row.expiresAt;
+  let expiresMs: number | undefined;
   if (typeof expiresAt === "string" && expiresAt.trim() !== "") {
-    const expiresMs = Date.parse(expiresAt);
-    if (Number.isFinite(expiresMs) && expiresMs <= now) return false;
+    expiresMs = Date.parse(expiresAt);
+    if (!Number.isFinite(expiresMs) || expiresMs <= now) return false;
   }
 
   evictIfNeeded(_keyValidationCache);
-  _keyValidationCache.set(cacheKey, { valid: true, timestamp: now });
+  _keyValidationCache.set(cacheKey, { valid: true, timestamp: now, expiresMs });
 
   if (isRedisAuthCacheEnabled()) {
     // Update Redis cache for fast validation
